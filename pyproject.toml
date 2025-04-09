@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools", "setuptools-scm"]
+build-backend = "setuptools.build_meta"
+
+[project]
+dynamic = ["version"]
+name = "mlsolidpy"
+description = "python client for the mlsolid MLOps platform"
+
+authors = [
+	{name = "zeddo123", email="m.drissi@protonmail.com"}
+]
+
+maintainers = [
+	{name = "zeddo123", email="m.drissi@protonmail.com"}
+]
+
+readme = "README.md"
+
+dependencies = [
+	"rich",
+	"randomname",
+	"zeddo123-mlsolid-grpc-python"
+]
+
+[project.urls]
+Repository = "https://github.com/zeddo123/mlsolidpy"
+
+[tool.setuptools]
+packages = ["mlsolidpy"]
+
+[tool.setuptools.dynamic]
+version = {attr = "mlsolidpy.__version__"}
