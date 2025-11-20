@@ -20,7 +20,6 @@ readme = "README.md"
 dependencies = [
 	"rich",
 	"randomname",
-	"zeddo123-mlsolid-grpc-python"
 ]
 
 [project.urls]

@@ -1,0 +1,2 @@
+-i https://buf.build/gen/python
+zeddo123-mlsolid-grpc-python==1.76.0.1.20251118172441+84676fc02cf9

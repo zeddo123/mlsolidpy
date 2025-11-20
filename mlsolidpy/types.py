@@ -1,8 +1,9 @@
 import datetime
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any, Protocol
 
-from mlsolid.v1.mlsolid_pb2 import Metric as p_Metric, Val
+from mlsolid.v1.mlsolid_pb2 import Metric as p_Metric, ModelEntry, Val
 
 
 class Metric(Protocol):
@@ -51,6 +52,28 @@ class Run:
     exp_id: str
     metrics: list[Metric]
 
+@dataclass
+class ModelRegistry:
+    id: str
+    entries: list[ModelEntry]
+    tags : dict[str, list[str]]
+
+@dataclass
+class ModelEntry:
+    url: str
+    tags: str
+
+@dataclass
+class Artifact:
+    name: str
+    artifact_type: str
+    run_id: str
+    content: bytes
+
+class ArtifactType(Enum):
+    ModelArtifact = "content-type/model"
+    PlainTextArtifact = "content-type/text"
+
 def to_protobuf_metrics(metrics: list[Metric]) -> list[p_Metric]:
     return [metric.to_protobuf() for metric in metrics]
 
@@ -76,3 +99,7 @@ def from_protobuf_metric(metric: p_Metric) -> Metric:
         out_metric.vals.append(getattr(val, val.WhichOneof('val')))
 
     return out_metric
+
+def chunk_bytes(data, chunk_size):
+    for i in range(0, len(data), chunk_size):
+        yield data[i:i + chunk_size]

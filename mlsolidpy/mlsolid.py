@@ -1,15 +1,18 @@
 from collections import defaultdict
+import pathlib
 from typing import Any, Iterator, Dict
 from contextlib import contextmanager
+from pathlib import Path
 
 import grpc
 import randomname
 from rich.console import Console
+from rich.progress import track
 from mlsolid.v1 import mlsolid_pb2_grpc
-from mlsolid.v1.mlsolid_pb2 import AddMetricsRequest, CreateRunRequest, ExperimentRequest, ExperimentResponse, ExperimentsRequest, RunRequest, RunResponse
+from mlsolid.v1.mlsolid_pb2 import AddArtifactRequest, AddMetricsRequest, AddModelEntryRequest, AddModelEntryResponse, ArtifactRequest, ArtifactResponse, Content, CreateModelRegistryRequest, CreateModelRegistryResponse, CreateRunRequest, ExperimentRequest, ExperimentResponse, ExperimentsRequest, MetaData, ModelEntry, ModelRegistryRequest, ModelRegistryResponse, RunRequest, RunResponse, StreamTaggedModelRequest, StreamTaggedModelResponse
 
 from mlsolidpy.exceptions import BadRequest, NotFound, InternalError
-from mlsolidpy.types import FloatMetric, Metric, Run, StrMetric, from_protobuf_metrics, to_protobuf_metrics
+from mlsolidpy.types import Artifact, ArtifactType, FloatMetric, Metric, ModelRegistry, Run, StrMetric, chunk_bytes, from_protobuf_metrics, to_protobuf_metrics
 
 
 console = Console()
@@ -19,14 +22,50 @@ class RunManager:
         self.exp_id = exp_id
         self.run_id = run_id
         self._metrics = defaultdict(list)
+        self._artifacts = []
 
     @property
     def metrics(self) -> list[Metric]:
         return [self._parse_metric(name, vals) for name, vals in self._metrics.items()]
 
+    @property
+    def artifacts(self) -> list[Artifact]:
+        return self._artifacts
+
     def log(self, data: Dict[str, Any]) -> None:
         for k, v in data.items():
             self._metrics[k].append(v)
+
+    def add_model(self, path: str) -> None:
+        name, content = self._read_file(path)
+
+        self._add_artifact(Artifact(name=name,
+                                   artifact_type=ArtifactType.ModelArtifact.value,
+                                   run_id=self.run_id,
+                                   content=content))
+
+    def add_plaintext_artifact(self, path: str) -> None:
+        name, content = self._read_file(path)
+
+        self._add_artifact(Artifact(name=name,
+                                   artifact_type=ArtifactType.PlainTextArtifact.value,
+                                   run_id=self.run_id,
+                                   content=content))
+
+    def _add_artifact(self, artifact: Artifact):
+        self._artifacts.append(artifact)
+
+    def _read_file(self, path: str):
+        path_obj = Path(path)
+
+
+        if not path_obj.exists() or not path_obj.is_file():
+            raise Exception(f'`{path}` does not exist')
+
+        with open(path_obj, 'rb') as f:
+            b = f.read()
+
+            return path_obj.name, b
 
     def _parse_metric(self, name: str, vals: list[Any]) -> Metric:
         flat = []
@@ -131,8 +170,123 @@ class Mlsolid:
         except grpc.RpcError as e:
             raise self._handle_grpc_error(e)
 
+    def artifact(self, run_id: str, artifact_name: str, path='./.mlsolid/artifacts'):
+        try:
+            resp: ArtifactResponse = self.stub.Artifact(ArtifactRequest(run_id=run_id, artifact_name=artifact_name))
+
+            metadata: MetaData = MetaData()
+            content = bytearray()
+
+            for response in track(resp, description='Downloading'):
+                one = response.WhichOneof('request')
+                if one == 'metadata':
+                    metadata = response.metadata
+                elif one == 'content':
+                    content.extend(response.content.content)
+
+            self._save_artifact(Artifact(name=metadata.name,
+                                         artifact_type=ArtifactType.ModelArtifact.value,
+                                         run_id=metadata.run_id,
+                                         content=bytes(content)), path)
+        except grpc.RpcError as e:
+            raise self._handle_grpc_error(e)
+
+    def add_artifacts(self, run_id: str, artifacts):
+        def generator_artifact(artifact: Artifact):
+            yield AddArtifactRequest(metadata=MetaData(run_id=run_id,
+                                                       type=artifact.artifact_type,
+                                                       name=artifact.name))
+
+            chunk_size = 1024
+            for chunk in track(chunk_bytes(artifact.content, chunk_size), description='Uploading...'):
+                yield AddArtifactRequest(content=Content(content=chunk))
+
+        console.print(f'📤 Uploading {len(artifacts)} run artifacts', style='bold')
+
+        for artifact in artifacts:
+            try:
+                console.print(f'📤 Uploading artifact <{artifact.name}> to mlsolid...', style='bold')
+                self.stub.AddArtifact(generator_artifact(artifact))
+                console.print(f'📥 Artifact <{artifact.name}> uploaded to mlsolid ✅', style='bold')
+            except grpc.RpcError as e:
+                raise self._handle_grpc_error(e)
+
+    def create_model_registry(self, id: str):
+        try:
+            resp: CreateModelRegistryResponse = self.stub.CreateModelRegistry(CreateModelRegistryRequest(name=id))
+
+            if resp.created:
+                console.print(f'📑 ModelRegistry <{id}> created successfully')
+            else:
+                console.print('⚠️ Could not create ModelRegistry')
+
+            return resp.created
+        except grpc.RpcError as e:
+            raise self._handle_grpc_error(e)
+    
+    def model_registry(self, id: str) -> ModelRegistry:
+        try:
+            resp: ModelRegistryResponse = self.stub.ModelRegistry(ModelRegistryRequest(name=id))
+
+            return ModelRegistry(id=resp.name,
+                                 entries=resp.model_entries,
+                                 tags=resp.tags)
+        except grpc.RpcError as e:
+            raise self._handle_grpc_error(e)
+
+    def add_model(self, id: str, run_id: str, artifact_id: str, tags: list[str]):
+        try:
+            resp: AddModelEntryResponse = self.stub.AddModelEntry(AddModelEntryRequest(name=id,
+                                                                                       artifact_id=artifact_id,
+                                                                                       run_id=run_id,
+                                                                                       tags=tags))
+            if resp.added:
+                console.print(f'📑 Model <{artifact_id}> added to ModelRegistry <{id}> with tag <{tags}>', style='bold')
+
+            return resp.added
+        except grpc.RpcError as e:
+            raise self._handle_grpc_error(e)
+
+    def tagged_model(self, id: str, tag: str, path='./.mlsolid/models') -> str:
+        try:
+            resp: StreamTaggedModelResponse = self.stub.StreamTaggedModel(StreamTaggedModelRequest(name=id, tag=tag))
+
+            metadata: MetaData = MetaData()
+            content = bytearray()
+
+            for response in track(resp, description='downloading...'):
+                one = response.WhichOneof('response')
+                if one == 'metadata':
+                    metadata = response.metadata
+                elif one == 'content':
+                    content.extend(response.content.content)
+
+            self._save_artifact(Artifact(name=metadata.name,
+                                         artifact_type=ArtifactType.ModelArtifact.value,
+                                         run_id=metadata.run_id,
+                                         content=bytes(content)), path)
+        except grpc.RpcError as e:
+            raise self._handle_grpc_error(e)
+
     def _commit_run(self, run: RunManager):
         self.add_metrics(run.run_id, run.metrics)
+        self.add_artifacts(run.run_id, run.artifacts)
+
+    def _save_artifact(self, artifact: Artifact, path: str):
+        path_obj = pathlib.Path(path)
+
+        if path_obj.is_file():
+            raise Exception(f'path <{path}> provided is a file')
+
+        if not path_obj.exists():
+            path_obj.mkdir(parents=True, exist_ok=True)
+
+        full_path = path_obj / artifact.name
+
+        with open(full_path, 'bw') as f:
+            f.write(artifact.content)
+
+        console.print(f'📁 Artifact <{artifact.name}> saved to `{full_path}`', style='bold')
 
     def _handle_grpc_error(self, exception: grpc.RpcError) -> Exception:
         details = exception.details() # type: ignore
