@@ -87,10 +87,20 @@ class RunManager:
                 return StrMetric(name=name, vals=flat)
 
 class Mlsolid:
-    def __init__(self, url: str) -> None:
+    def __init__(self, url: str, insecure: bool = False, ca_cert_path: None | str = None) -> None:
         self.url = url
 
-        self.channel = grpc.insecure_channel(self.url)
+        if insecure:
+            self.channel = grpc.insecure_channel(self.url)
+        elif ca_cert_path is None:
+            self.channel = grpc.secure_channel(self.url, grpc.ssl_channel_credentials())
+        elif ca_cert_path:
+            with open(ca_cert_path) as f:
+                root_certificates = f.read()
+                self.channel = grpc.secure_channel(self.url, grpc.ssl_channel_credentials(
+                    root_certificates=root_certificates
+                    ))
+
         self.stub = mlsolid_pb2_grpc.MlsolidServiceStub(self.channel)
 
     @property
